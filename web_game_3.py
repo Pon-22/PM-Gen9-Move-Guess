@@ -249,7 +249,7 @@ def generate_new_question(vgc_db, full_db):
 
 # --- 主程式 UI ---
 
-st.title("🎮 寶可夢 VGC 配招猜猜看")
+st.title("GEN 9 PM Move Guess")
 
 # 1. 載入資料
 full_db = load_full_cache()
