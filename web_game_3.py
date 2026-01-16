@@ -6,7 +6,7 @@ import requests
 from opencc import OpenCC
 
 # --- 設定頁面資訊 ---
-st.set_page_config(page_title="PM Move Guess", page_icon="🎮")
+st.set_page_config(page_title="GEN 9 PM Move Guess", page_icon="🎮")
 
 # --- 初始化轉換器 ---
 if 'cc' not in st.session_state:
@@ -21,6 +21,13 @@ TOP_N_POKEMON = 200
 TOP_N_MOVES_POOL = 20                       
 CLUES_NUM = 1                               
 DISTRACTOR_NUM = 3   
+
+# ★★★ 新增：招式黑名單 (請用英文、小寫、連字號格式) ★★★
+# 這些招式太氾濫，不適合當作題目或干擾
+BANNED_MOVES = {
+    "protect",          # 守住
+    "tera-blast",       # 太晶爆發
+}
 
 # --- 工具函式 ---
 def normalize_name(name):
@@ -83,10 +90,7 @@ def load_vgc_data():
 # --- API 與資料處理函式 ---
 
 def get_pokemon_names(name_or_id):
-    """
-    僅用於取得 ID 與顯示用翻譯 
-    (API 請求維持，因為 ID 和圖片需要官方編號)
-    """
+    """僅用於取得 ID 與顯示用翻譯"""
     url = f"https://pokeapi.co/api/v2/pokemon-species/{name_or_id}"
     try:
         response = requests.get(url, timeout=5)
@@ -108,40 +112,35 @@ def get_pokemon_names(name_or_id):
         return None, None, None, None
 
 def get_random_moves_from_cache(full_db, pokemon_name, excluded_moves, count=3):
-    """
-    從快取抓干擾招式，並加入「模糊比對」機制解決形態名稱問題
-    (例如：VGC 給 'Landorus'，但快取只有 'landorus-incarnate')
-    """
+    """從快取抓干擾招式，排除 Excluded 和 Banned 招式，並支援模糊比對"""
     target_key = normalize_name(pokemon_name)
     
-    # 1. 第一步：嘗試精準比對
+    # 1. 嘗試比對 (精準 -> 模糊)
     if target_key in full_db:
         pm_data = full_db[target_key]
     else:
-        # 2. 第二步：嘗試模糊比對 (Prefix Match)
-        # 找出所有 "landorus-" 開頭的 key (例如 landorus-incarnate)
-        # 並且取第一個找到的當作替代品
         found_key = None
         for key in full_db.keys():
-            # 加個連字號避免匹配錯誤 (如 mew 匹配到 mewtwo)
             if key.startswith(target_key + "-"):
                 found_key = key
                 break
-        
         if found_key:
             pm_data = full_db[found_key]
         else:
-            # 真的完全找不到 (例如資料庫缺漏)
             return []
 
-    # 3. 取得招式池
+    # 2. 取得並過濾招式
     all_moves_data = pm_data.get('moves', [])
     
+    # 這裡的 excluded_moves 是正確答案，BANNED_MOVES 是通用廢招
     excluded_set = {normalize_name(m) for m in excluded_moves}
+    
     candidate_moves = []
     
     for move_name in all_moves_data:
-        if normalize_name(move_name) not in excluded_set:
+        norm_move = normalize_name(move_name)
+        # ★★★ 過濾黑名單 ★★★
+        if norm_move not in excluded_set and norm_move not in BANNED_MOVES:
             candidate_moves.append(move_name)
             
     actual_count = min(count, len(candidate_moves))
@@ -150,7 +149,7 @@ def get_random_moves_from_cache(full_db, pokemon_name, excluded_moves, count=3):
     return random.sample(candidate_moves, actual_count)
 
 def get_move_info(move_name):
-    """取得招式的 中文、日文、英文 名稱 (維持 API，因翻譯資料較大未存入快取)"""
+    """取得招式翻譯"""
     formatted_name = normalize_name(move_name)
     url = f"https://pokeapi.co/api/v2/move/{formatted_name}"
     try:
@@ -179,7 +178,7 @@ def get_move_info(move_name):
         return move_name, move_name, move_name
 
 def find_other_matches(full_db, quiz_moves, current_answer_en_name):
-    """反向搜尋：回傳 中 | 日 | 英"""
+    """反向搜尋"""
     if not full_db: return []
     quiz_moves_set = {normalize_name(m) for m in quiz_moves}
     matches = []
@@ -195,26 +194,36 @@ def find_other_matches(full_db, quiz_moves, current_answer_en_name):
     return matches
 
 def generate_new_question(vgc_db, full_db):
-    """產生題目並存入 session_state"""
+    """產生題目"""
     if not vgc_db:
         st.error("資料庫為空")
         return
 
     target_pm_name = random.choice(list(vgc_db.keys()))
     pm_data = vgc_db[target_pm_name]
-    move_pool = pm_data['moves']
+    raw_move_pool = pm_data['moves']
     
+    # ★★★ 步驟 1: 先把 VGC 招式池裡的黑名單招式過濾掉 ★★★
+    valid_vgc_pool = [
+        m for m in raw_move_pool 
+        if normalize_name(m) not in BANNED_MOVES
+    ]
+    
+    # 如果過濾完沒招式了 (極少見)，就只好用原本的，避免崩潰
+    if not valid_vgc_pool:
+        valid_vgc_pool = raw_move_pool
+
     id, jpn, chn, enn = get_pokemon_names(target_pm_name)
-    
-    # 避免 API 失敗
     if id is None:
-        # 如果 API 失敗，重試一次 (需注意遞迴深度，但在這裡通常沒事)
         return generate_new_question(vgc_db, full_db)
 
-    if len(move_pool) < CLUES_NUM: vgc_moves = move_pool
-    else: vgc_moves = random.sample(move_pool, CLUES_NUM)
+    # 從過濾後的池子抽正確答案
+    if len(valid_vgc_pool) < CLUES_NUM: 
+        vgc_moves = valid_vgc_pool
+    else: 
+        vgc_moves = random.sample(valid_vgc_pool, CLUES_NUM)
     
-    # --- 修改這裡：使用 Cache 版的隨機招式 ---
+    # 抽干擾招 (這函式裡面也已經加入了黑名單過濾)
     random_fillers = get_random_moves_from_cache(full_db, target_pm_name, vgc_moves, count=DISTRACTOR_NUM)
     
     final_move_list = []
@@ -227,13 +236,11 @@ def generate_new_question(vgc_db, full_db):
             seen_moves.add(norm)
     random.shuffle(final_move_list)
     
-    # 翻譯招式
     translated_moves = []
     for m in final_move_list:
         z, j, e = get_move_info(m)
         translated_moves.append(f"**{z}**\n\n{j}\n\n*{e}*") 
 
-    # 存入 Session State
     st.session_state.current_q = {
         "moves_display": translated_moves,
         "moves_raw": final_move_list,
@@ -251,25 +258,22 @@ def generate_new_question(vgc_db, full_db):
 
 st.title("GEN 9 PM Move Guess")
 
-# 1. 載入資料
 full_db = load_full_cache()
 vgc_db = load_vgc_data()
 
 if not full_db:
-    st.warning("⚠️ 找不到全招式快取，反向搜尋與隨機招式功能將受限。")
+    st.warning("⚠️ 找不到全招式快取，功能受限。")
 if not vgc_db:
-    st.error("❌ 找不到 VGC JSON 資料，請檢查路徑設定。")
+    st.error("❌ 找不到 VGC JSON 資料。")
     st.stop()
 
-# 2. 初始化題目 (傳入 full_db)
 if 'current_q' not in st.session_state:
     generate_new_question(vgc_db, full_db)
 
-# 3. 顯示按鈕區
 col1, col2 = st.columns([1, 1])
 with col1:
     if st.button("🔄 下一題", use_container_width=True):
-        generate_new_question(vgc_db, full_db) # 這裡也要傳入 full_db
+        generate_new_question(vgc_db, full_db)
         st.rerun()
 
 with col2:
@@ -277,18 +281,14 @@ with col2:
         st.session_state.show_answer = True
         st.rerun()
 
-# 4. 顯示題目 (招式)
 q = st.session_state.current_q
 if q:
-    st.subheader("這隻寶可夢會使用：")
-    
-    # 用 4 個欄位顯示招式
+    st.subheader("這隻PM會使用：")
     m_cols = st.columns(4)
     for i, move_text in enumerate(q['moves_display']):
         with m_cols[i % 4]:
             st.info(move_text)
 
-    # 5. 顯示答案區
     if st.session_state.show_answer:
         st.divider()
         st.success(f"### 答案：{q['answer_name']} ({q['answer_jp']})")
@@ -298,13 +298,11 @@ if q:
         img_url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{q['answer_id']}.png"
         st.image(img_url, width=200)
 
-        # 反向搜尋 (撞招檢查)
         with st.spinner("正在檢查是否有其他寶可夢會這四招..."):
             others = find_other_matches(full_db, q['moves_raw'], q['target_pm_name'])
         
         if others:
-            st.warning(f"還有{len(others)}隻PM也會這組配招：")
-            # 顯示列表
+            st.warning(f"還有 {len(others)} 隻PM也會這組配招：")
             for o in others:
                 st.write(f"- {o}")
         else:
